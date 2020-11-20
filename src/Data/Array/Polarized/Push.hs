@@ -63,3 +63,22 @@ append (Array kl nl) (Array kr nr) =
   where
     parallelApply :: (a %1-> b) -> ((a %1-> b) -> DArray b %1-> ()) %1-> ((a %1-> b) -> DArray b %1-> ()) %1-> (DArray b, DArray b) %1-> ()
     parallelApply f' kl' kr' (dl, dr) = kl' f' dl <> kr' f' dr
+
+
+data Allocable a where
+  -- The second parameter is the length of the @DArray@
+  Allocable :: (DArray a %1-> ()) %1-> !Int -> Allocable a
+  deriving Prelude.Semigroup via NonLinear (Allocable a)
+
+instance Semigroup (Allocable a) where
+  (<>) = appendAllocable
+
+-- | Concatenate two push arrays.
+appendAllocable :: Allocable a %1-> Allocable a %1-> Allocable a
+appendAllocable (Allocable kl nl) (Allocable kr nr) =
+    Allocable
+      (\dest -> parallelApply kl kr (DArray.split nl dest))
+      (nl+nr)
+  where
+    parallelApply :: (DArray b %1-> ()) %1-> (DArray b %1-> ()) %1-> (DArray b, DArray b) %1-> ()
+    parallelApply kl' kr' (dl, dr) = kl' dl <> kr' dr
