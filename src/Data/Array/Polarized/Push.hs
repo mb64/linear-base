@@ -33,11 +33,11 @@ import qualified Prelude
 -- computations passed along or enlarged until we are ready to allocate.
 data Array a where
   -- The second parameter is the length of the @DArray@
-  Array :: (forall b. (a %1-> b) -> DArray b %1-> ()) %1-> Int -> Array a
+  Array :: (forall m. Monoid m => (a -> m) -> m) %1-> Array a
   deriving Prelude.Semigroup via NonLinear (Array a)
 
 instance Data.Functor Array where
-  fmap f (Array k n) = Array (\g dest -> k (g . f) dest) n
+  fmap f (Array k) = Array (\g -> k (\x -> (g (f x))))
 
 instance Semigroup (Array a) where
   (<>) = append
@@ -47,7 +47,7 @@ instance Semigroup (Array a) where
 -- | Convert a push array into a vector by allocating. This would be a common
 -- end to a computation using push and pull arrays.
 alloc :: Array a %1-> Vector a
-alloc (Array k n) = DArray.alloc n (k id)
+alloc (Array k) = allocAllocable $ k singletonAllocable
 
 -- | @`make` x n@ creates a constant push array of length @n@ in which every
 -- element is @x@.
@@ -73,6 +73,12 @@ data Allocable a where
 instance Semigroup (Allocable a) where
   (<>) = appendAllocable
 
+instance Monoid (Allocable a)
+
+singletonAllocable :: a -> Allocable a
+singletonAllocable a =
+  Allocable _ 1
+
 -- | Concatenate two push arrays.
 appendAllocable :: Allocable a %1-> Allocable a %1-> Allocable a
 appendAllocable (Allocable kl nl) (Allocable kr nr) =
@@ -82,3 +88,6 @@ appendAllocable (Allocable kl nl) (Allocable kr nr) =
   where
     parallelApply :: (DArray b %1-> ()) %1-> (DArray b %1-> ()) %1-> (DArray b, DArray b) %1-> ()
     parallelApply kl' kr' (dl, dr) = kl' dl <> kr' dr
+
+allocAllocable :: Allocable a %1 -> Vector a
+allocAllocable (Allocable k n) = DArray.alloc n k
