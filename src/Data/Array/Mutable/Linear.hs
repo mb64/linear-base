@@ -75,7 +75,7 @@ import Prelude hiding (read, map)
 -- # Data types
 -------------------------------------------------------------------------------
 
-data Array a = Array (Array# a)
+data Array a = Array !(Array# a)
 
 -- # Creation
 -------------------------------------------------------------------------------

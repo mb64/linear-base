@@ -108,26 +108,29 @@ data HashMap k v where
   -- - array is non-empty
   -- - (count / capacity) <= constMaxLoadFactor.
   HashMap
-    :: Int -- ^ The number of stored (key, value) pairs.
-    -> RobinArr k v -- ^ Underlying array.
+    :: {-# UNPACK #-} !Int -- ^ The number of stored (key, value) pairs.
+    -> {-# UNPACK #-} !(RobinArr k v) -- ^ Underlying array.
     %1-> HashMap k v
 
 -- | An array of Robin values
 --
--- Each cell is Nothing if empty and is a RobinVal with the correct
+-- Each cell is Empty if empty and RobinVal with the correct
 -- PSL otherwise.
-type RobinArr k v = Array (Maybe (RobinVal k v))
+type RobinArr k v = Array (RobinVal k v)
 
 -- | Robin values are triples of the key, value and PSL
 -- (the probe sequence length).
-data RobinVal k v = RobinVal {-# UNPACK #-} !PSL k v
+data RobinVal k v = RobinVal {-# UNPACK #-} !PSL !k v
+                  | Empty
   deriving (Show)
 
 incRobinValPSL :: RobinVal k v -> RobinVal k v
 incRobinValPSL (RobinVal (PSL p) k v) = RobinVal (PSL (p+1)) k v
+incRobinValPSL Empty = Empty
 
 decRobinValPSL :: RobinVal k v -> RobinVal k v
 decRobinValPSL (RobinVal (PSL p) k v) = RobinVal (PSL (p-1)) k v
+decRobinValPSL Empty = Empty
 
 -- | A probe sequence length
 newtype PSL = PSL Int
@@ -161,13 +164,13 @@ empty :: forall k v b.
 empty size scope =
   Array.alloc
     (max 1 size)
-    Nothing
+    Empty
     (\arr -> scope (HashMap 0 arr))
 
 -- | Create an empty HashMap, using another as a uniqueness proof.
 allocBeside :: Keyed k => Int -> HashMap k' v' %1-> (HashMap k v, HashMap k' v')
 allocBeside size (HashMap s' arr) =
-  Array.allocBeside (max 1 size) Nothing arr & \(arr', arr'') ->
+  Array.allocBeside (max 1 size) Empty arr & \(arr', arr'') ->
     (HashMap size arr', HashMap s' arr'')
 
 -- | Run a computation with an 'HashMap' containing given key-value pairs.
@@ -178,7 +181,7 @@ fromList xs scope =
     (max
       1
       (ceiling @Float @Int (fromIntegral (Prelude.length xs) / constMaxLoadFactor)))
-    Nothing
+    Empty
     (\arr -> scope (insertAll xs (HashMap 0 arr)))
 
 -- | The most general modification function; which can insert, update or delete
@@ -197,7 +200,7 @@ alterF f key hm =
           Ur (Just v)->
             HashMap
              (count+1)
-             (Array.write arr ix (Just (RobinVal psl key v)))
+             (Array.write arr ix (RobinVal psl key v))
              & growMapIfNecessary
       -- The key exists.
       (hm'', IndexToUpdate v psl ix) ->
@@ -205,7 +208,7 @@ alterF f key hm =
           f (Just v) Control.<&> \case
             -- We need to delete it.
             Ur Nothing ->
-              Array.write arr ix Nothing & \arr' ->
+              Array.write arr ix Empty & \arr' ->
                 shiftSegmentBackward 1 cap arr' ((ix + 1) `mod` cap) & \arr'' ->
                   HashMap
                     (count - 1)
@@ -214,7 +217,7 @@ alterF f key hm =
             Ur (Just new)->
               HashMap
                 count
-                (Array.write arr ix (Just (RobinVal psl key new)))
+                (Array.write arr ix (RobinVal psl key new))
       -- The key does not exist, but there is a key to evict.
       (hm, IndexToSwap evicted psl ix) ->
         f Nothing Control.<&> \case
@@ -226,7 +229,7 @@ alterF f key hm =
               tryInsertAtIndex
                 (HashMap
                   count
-                  (Array.write arr ix (Just (RobinVal psl key v))))
+                  (Array.write arr ix (RobinVal psl key v)))
                 ((ix + 1) `mod` cap)
                 (incRobinValPSL evicted)
               & growMapIfNecessary
@@ -299,22 +302,22 @@ mapMaybeWithKey f (HashMap _ arr) = Array.size arr & \(Ur size, arr1) ->
         then (Ur count, shiftSegmentBackward dec (end+1) arr 0)
         else (Ur count, arr)
     | otherwise = Array.read arr ix & \case
-        (Ur Nothing, arr1) ->
+        (Ur Empty, arr1) ->
           mapAndPushBack (ix+1) end (False,0) count arr1
-        (Ur (Just (RobinVal (PSL p) k v)), arr1) -> case f' k v of
-          Nothing -> Array.write arr1 ix Nothing &
+        (Ur (RobinVal (PSL p) k v), arr1) -> case f' k v of
+          Nothing -> Array.write arr1 ix Empty &
             \arr2 -> mapAndPushBack (ix+1) end (True,dec+1) count arr2
           Just v' -> case shift of
-            False -> Array.write arr1 ix (Just (RobinVal (PSL p) k v')) &
+            False -> Array.write arr1 ix (RobinVal (PSL p) k v') &
               \arr2 -> mapAndPushBack (ix+1) end (False,0) (count+1) arr2
             True -> case dec <= p of
-              False -> Array.write arr1 (ix-p) (Just (RobinVal 0 k v')) &
+              False -> Array.write arr1 (ix-p) (RobinVal 0 k v') &
                 \arr2 -> case p == 0 of
-                  False -> Array.write arr2 ix Nothing &
+                  False -> Array.write arr2 ix Empty &
                     \arr3 -> mapAndPushBack (ix+1) end (True,p) (count+1) arr3
                   True -> mapAndPushBack (ix+1) end (False,0) (count+1) arr2
-              True -> Array.write arr1 (ix-dec) (Just (RobinVal (PSL (p-dec)) k v')) &
-                \arr2 -> Array.write arr2 ix Nothing &
+              True -> Array.write arr1 (ix-dec) (RobinVal (PSL (p-dec)) k v') &
+                \arr2 -> Array.write arr2 ix Empty &
                   \arr3 -> mapAndPushBack (ix+1) end (True,dec) (count+1) arr3
 
 -- | Complexity: O(capacity hm)
@@ -442,8 +445,9 @@ toList :: HashMap k v %1-> Ur [(k, v)]
 toList (HashMap _ arr) =
   Array.toList arr & \(Ur elems) ->
     elems
-      NonLinear.& NonLinear.catMaybes
-      NonLinear.& Prelude.map (\(RobinVal _ k v) -> (k, v))
+      NonLinear.& NonLinear.mapMaybe (\case
+        RobinVal _ k v -> Just (k, v)
+        Empty -> Nothing)
       NonLinear.& Ur
 
 -- # Instances
@@ -462,8 +466,8 @@ instance Data.Functor (HashMap k) where
     HashMap c $
       Data.fmap
         (\case
-          Nothing -> Nothing
-          Just (RobinVal p k v) -> Just (RobinVal p k (f v))
+          Empty -> Empty
+          RobinVal p k v -> RobinVal p k (f v)
         )
         arr
 
@@ -493,9 +497,9 @@ idealIndexForKey k hm =
 probeFrom :: Keyed k =>
   (k, PSL) -> Int -> HashMap k v %1-> (HashMap k v, ProbeResult k v)
 probeFrom (k, p) ix (HashMap ct arr) = Array.read arr ix & \case
-  (Ur Nothing, arr') ->
+  (Ur Empty, arr') ->
     (HashMap ct arr', IndexToInsert p ix)
-  (Ur (Just robinVal'@(RobinVal psl k' v')), arr') ->
+  (Ur (robinVal'@(RobinVal psl k' v')), arr') ->
     case k == k' of
       -- Note: in the True case, we must have p == psl
       True -> (HashMap ct arr', IndexToUpdate v' psl ix)
@@ -512,13 +516,13 @@ tryInsertAtIndex :: Keyed k =>
 tryInsertAtIndex hmap ix (RobinVal psl key val) =
   probeFrom (key, psl) ix hmap & \case
     (HashMap ct arr, IndexToUpdate _ psl' ix') ->
-      HashMap ct (Array.write arr ix' (Just $ RobinVal psl' key val))
+      HashMap ct (Array.write arr ix' (RobinVal psl' key val))
     (HashMap c arr, IndexToInsert psl' ix') ->
-      HashMap (c + 1) (Array.write arr ix' (Just $ RobinVal psl' key val))
+      HashMap (c + 1) (Array.write arr ix' (RobinVal psl' key val))
     (hm, IndexToSwap oldVal psl' ix') ->
       capacity hm  & \(Ur cap, HashMap ct arr) ->
         tryInsertAtIndex
-          (HashMap ct (Array.write arr ix' (Just $ RobinVal psl' key val)))
+          (HashMap ct (Array.write arr ix' (RobinVal psl' key val)))
           ((ix' + 1) `mod` cap)
           (incRobinValPSL oldVal)
 
@@ -528,14 +532,14 @@ tryInsertAtIndex hmap ix (RobinVal psl key val) =
 shiftSegmentBackward :: Keyed k =>
   Int -> Int -> RobinArr k v %1-> Int -> RobinArr k v
 shiftSegmentBackward dec s arr ix = Array.read arr ix & \case
-  (Ur Nothing, arr') -> arr'
-  (Ur (Just (RobinVal 0 _ _)), arr') -> arr'
-  (Ur (Just val), arr') ->
-    Array.write arr' ix Nothing & \arr'' ->
+  (Ur Empty, arr') -> arr'
+  (Ur (RobinVal 0 _ _), arr') -> arr'
+  (Ur val, arr') ->
+    Array.write arr' ix Empty & \arr'' ->
       shiftSegmentBackward
         dec
         s
-        (Array.write arr'' ((ix-dec+s) `mod` s) (Just $ decRobinValPSL val))
+        (Array.write arr'' ((ix-dec+s) `mod` s) (decRobinValPSL val))
         ((ix+1) `mod` s)
 -- TODO: This does twice as much writes than necessary, it first empties
 -- the cell, just to update it again at the next call. We can save some
@@ -560,12 +564,13 @@ growMapIfNecessary hm =
 -- checked.
 resize :: Keyed k => Int -> HashMap k v %1-> HashMap k v
 resize targetSize (HashMap _ arr) =
-  Array.allocBeside targetSize Nothing arr & \(newArr, oldArr) ->
+  Array.allocBeside targetSize Empty arr & \(newArr, oldArr) ->
     Array.toList oldArr & \(Ur elems) ->
       let xs =
             elems
-              NonLinear.& NonLinear.catMaybes
-              NonLinear.& Prelude.map (\(RobinVal _ k v) -> (k, v))
+              NonLinear.& NonLinear.mapMaybe (\case
+                RobinVal _ k v -> Just (k, v)
+                Empty -> Nothing)
        in  insertAll xs (HashMap 0 newArr)
 -- TODO: 'insertAll' keeps checking capacity on each insert. We should
 -- replace it with a faster unsafe variant.
